@@ -208,6 +208,12 @@ def animate_trace(trace,
         print("I'll animate the progress animation")
         which_animate = "progress"
     # Begin estimation and preprocessing
+    try:
+        trace.information["HWLOC-XML"]
+        running_system = "dplasma"
+    except KeyError:
+        running_system = "hicma"
+    print("I think this trace is for a task that was running on", running_system)
     work_tasks_indices = []
     if task_type == "gemm":
         gemm_index_found = 0
@@ -326,19 +332,28 @@ def animate_trace(trace,
     
     
     C_status = []
+    C_expected = []
     for i in range(Ntiles_m):
         C_status.append(np.zeros(Ntiles_n))
+        C_expected.append(np.zeros(Ntiles_n))
     C_status = np.array(C_status)
+    C_expected = np.array(C_expected)
     
     if(which_animate == "abcprogress" or which_animate == "abctasks"):
         A_status = []
+        A_expected = []
         for i in range(Ntiles_m):
             A_status.append(np.zeros(Ntiles_k))
+            A_expected.append(np.zeros(Ntiles_k))
         A_status = np.array(A_status)
+        A_expected = np.array(A_expected)
         B_status = []
+        B_expected = []
         for i in range(Ntiles_k):
             B_status.append(np.zeros(Ntiles_n))
+            B_expected.append(np.zeros(Ntiles_n))
         B_status = np.array(B_status)
+        B_expected = np.array(B_expected)
     
     
     # Prepare the figure that will be displayed
@@ -355,21 +370,21 @@ def animate_trace(trace,
         if(figsize_y < fmd):
             figsize_y = fmd
             
-    visual_vmax = Ntiles_k
+    visual_vmax = Ntiles_k # TODO: remove if percentage is the way to go
     # Make the figure
     if(which_animate == "abcprogress" or which_animate == "abctasks"):
         fig, ((axx, axB), (axA, axC)) = plt.subplots(2,2, figsize = [figsize_x, figsize_y])
         # fig.colorbar(axC.pcolormesh(C_status,vmin=0,vmax=visual_vmax))
-        axA.pcolormesh(A_status, vmin = 0, vmax = Ntiles_n)
+        axA.pcolormesh(A_status, vmin = 0, vmax = 1)
         axA.invert_yaxis()
-        axB.pcolormesh(B_status, vmin = 0, vmax = Ntiles_m)
+        axB.pcolormesh(B_status, vmin = 0, vmax = 1)
         axB.invert_yaxis()
-        axC.pcolormesh(C_status, vmin = 0, vmax = Ntiles_k)
+        axC.pcolormesh(C_status, vmin = 0, vmax = 1)
         axC.invert_yaxis()
     else:
         fig, ax = plt.subplots(1, figsize = [figsize_x, figsize_y])
         ax.pcolormesh(C_status, vmin = 0, vmax = visual_vmax)
-        fig.colorbar(ax.pcolormesh(C_status,vmin=0,vmax=visual_vmax))
+        fig.colorbar(ax.pcolormesh(C_status,vmin=0,vmax=1))
         ax.invert_yaxis()
     
     # Enter the animation functions
@@ -396,6 +411,19 @@ def animate_trace(trace,
             print("warning: it seems like your trace has %d tasks, but I expected %d "
                      % (len(orderdf), expected_tasks)
                      + "based on the arguments you provided for N, M, K, and tilesize.")
+            
+        if task_type == "gemm":
+            C_expected += Ntiles_k
+            if plots == "abc":
+                A_expected += Ntiles_n
+                B_expected += Ntiles_m
+        elif task_type == "potrf": # TODO: add tasks to this animation function, have it be an even C_expected
+            for i in range(len(C_expected)):
+                for j in range(len(C_expected[0])):
+                    if j <= i:
+                        C_expected[i,j] = j+1
+        else:
+            print("Error: unknown task type")
         return
     
     def animate_init_abc():
@@ -424,8 +452,8 @@ def animate_trace(trace,
             C_status = C_status * 0 # Always zero when doing task timing
             if(plots == "abc"):
                 A_status = A_status * 0 # Always zero when doing task timing
-                B_status = B_status * 0 # Always zero when doing task timing
-            
+                B_status = B_status * 0 # Always zero when doing task timing 
+                
         tasks_before = orderdf.loc[orderdf["end"] <= time_point_curr]
         tasks_during = tasks_before.loc[(tasks_before["end"] > time_point_prev)]
             # aside: you might think this construction with > time_point_prev wouldn't include the first task,
@@ -438,34 +466,40 @@ def animate_trace(trace,
             for tid in tasks_during["id"]:
                 tid_normed = indices_arr[np.where(id_orders == tid)][0]
                 element = ideal_order[indices_arr[tid_normed]]
+                m = element[0]
+                n = element[1]
+                k = element[2]
                 if(plots == "c"):
-                    C_status[element[0],element[1]] += 1
+                    C_status[m, n] += 1 / C_expected[m, n]
                 elif(plots == "abc"):
-                    A_status[element[0],element[2]] += 1
-                    B_status[element[2],element[1]] += 1
-                    C_status[element[0],element[1]] += 1
+                    A_status[m, k] += 1 / A_expected[m, k]
+                    B_status[k, n] += 1 / B_expected[k, n]
+                    C_status[m, n] += 1 / C_expected[m, n]
         elif trace_type == "ptg":
             for index, task in tasks_during.iterrows():
+                m = task["m"]
+                n = task["n"]
+                k = task["k"]
                 if(plots == "c"):
-                    C_status[task["m"], task["n"]] += 1
+                    C_status[m, n] += 1 / C_expected[m, n]
                 elif(plots == "abc"):
-                    A_status[task["m"], task["k"]] += 1
-                    B_status[task["k"], task["n"]] += 1
-                    C_status[task["m"], task["n"]] += 1
+                    A_status[m, k] += 1 / A_expected[m, k]
+                    B_status[k, n] += 1 / B_expected[k, n]
+                    C_status[m, n] += 1 / C_expected[m, n]
                 
         vmax_A = Ntiles_n
         vmax_B = Ntiles_m
-        vmax_C = Ntiles_k
+        vmax_C = Ntiles_k # TODO: remove these if we go through with the percentage calculation
         if(plots == "c"):
             ax.set_title("Matrix C at time t=%fs (%s)" % (time_point_curr/10**9, title))
-            ax.pcolormesh(C_status, vmin = 0, vmax = vmax_C)
+            ax.pcolormesh(C_status, vmin = 0, vmax = 1)
         elif(plots == "abc"):
             axA.set_title("Matrix A")
-            axA.pcolormesh(A_status, vmin = 0, vmax = vmax_A)
+            axA.pcolormesh(A_status, vmin = 0, vmax = 1)
             axB.set_title("Matrix B")
-            axB.pcolormesh(B_status, vmin = 0, vmax = vmax_B)
+            axB.pcolormesh(B_status, vmin = 0, vmax = 1)
             axC.set_title("Matrix C")
-            axC.pcolormesh(C_status, vmin = 0, vmax = vmax_C)
+            axC.pcolormesh(C_status, vmin = 0, vmax = 1)
         return
     
     def animate_gemm_dtd_order_with_time(frame):
@@ -497,7 +531,6 @@ def animate_trace(trace,
         global tasks_at_frame
         global orderdf
         global C_expected
-        print("warning: C_expected not initialized")
         # time_point_curr and time_point_prev in units of nanoseconds
         time_point_curr = ((frame+1)*(last_end - first_begin))//num_frames + first_begin
         time_point_prev = ((frame+0)*(last_end - first_begin))//num_frames + first_begin
@@ -520,62 +553,64 @@ def animate_trace(trace,
             n = task["n"]
             k = task["k"]
             # print("type:", task["type"], "m,n,k:", m,n,k)
-            """ ## DPLASMA
-            if task["type"] == name_to_task_num["potrf"]:
-                if k is None:
-                    print("k should not be none here")
-                C_status[k, k] += 1
-            elif task["type"] == name_to_task_num["trsm"]:
-                if k is None:
-                    print("k should not be none here")
-                if n is None:
-                    print("n should not be none here")
-                C_status[n, k] += 1
-            elif task["type"] == name_to_task_num["syrk"]:
-                if n is None:
-                    print("n should not be none here")
-                C_status[n, n] += 1
-            elif task["type"] == name_to_task_num["gemm"]:
-                if m is None:
-                    print("m should not be none here")
-                if n is None:
-                    print("n should not be none here")
-                C_status[n, m] += 1
+            # dplasma and hicma order the m, n, and k differently
+            if running_system == "dplasma":
+                if task["type"] == name_to_task_num["potrf"]:
+                    if k is None:
+                        print("k should not be none here")
+                    C_status[k, k] += 1 / C_expected[k, k]
+                elif task["type"] == name_to_task_num["trsm"]:
+                    if k is None:
+                        print("k should not be none here")
+                    if n is None:
+                        print("n should not be none here")
+                    C_status[n, k] += 1 / C_expected[n, k]
+                elif task["type"] == name_to_task_num["syrk"]:
+                    if n is None:
+                        print("n should not be none here")
+                    C_status[n, n] += 1 / C_expected[n, n]
+                elif task["type"] == name_to_task_num["gemm"]:
+                    if m is None:
+                        print("m should not be none here")
+                    if n is None:
+                        print("n should not be none here")
+                    C_status[n, m] += 1 / C_expected[n, m]
+                else:
+                    print(task)
+                    print("error: unexpected task of type %d" % task["type"])
+            elif running_system == "hicma":
+                if task["type"] == name_to_task_num["potrf"]:
+                    if k is None:
+                        print("k should not be none here (potrf)")
+                    C_status[k, k] += 1 / C_expected[k, k]
+                elif task["type"] == name_to_task_num["trsm"]:
+                    if m is None:
+                        print("m should not be none here (trsm)")
+                    if k is None:
+                        print("k should not be none here (trsm)")
+                    C_status[m, k] += 1 / C_expected[m, k]
+                elif task["type"] == name_to_task_num["syrk"]:
+                    if m is None:
+                        print("m should not be none here (syrk)")
+                    C_status[m, m] += 1 / C_expected[m, m]
+                elif task["type"] == name_to_task_num["gemm"]:
+                    if m is None:
+                        print("m should not be none here (gemm)")
+                    if n is None:
+                        print("n should not be none here (gemm)")
+                    C_status[m, n] += 1 / C_expected[m, n]
+                else:
+                    print(task)
+                    print("error: unexpected task of type %d" % task["type"])
             else:
-                print(task)
-                print("error: unexpected task of type %d" % task["type"])
-            """
-            ## hicma
-            if task["type"] == name_to_task_num["potrf"]:
-                if k is None:
-                    print("k should not be none here (potrf)")
-                C_status[k, k] += 1
-            elif task["type"] == name_to_task_num["trsm"]:
-                if m is None:
-                    print("m should not be none here (trsm)")
-                if k is None:
-                    print("k should not be none here (trsm)")
-                C_status[m, k] += 1
-            elif task["type"] == name_to_task_num["syrk"]:
-                if m is None:
-                    print("m should not be none here (syrk)")
-                C_status[m, m] += 1
-            elif task["type"] == name_to_task_num["gemm"]:
-                if m is None:
-                    print("m should not be none here (gemm)")
-                if n is None:
-                    print("n should not be none here (gemm)")
-                C_status[m, n] += 1
-            else:
-                print(task)
-                print("error: unexpected task of type %d" % task["type"])
+                print("Error: unknown running system")
                 
         vmax_A = Ntiles_n
         vmax_B = Ntiles_m
         vmax_C = Ntiles_k
         
         ax.set_title("Matrix C at time t=%fs (%s)" % (time_point_curr/10**9, title))
-        ax.pcolormesh(C_status, vmin = 0, vmax = vmax_C)
+        ax.pcolormesh(C_status, vmin = 0, vmax = 1)
         return
     
     def animate_potrf_tasks(frame):
@@ -618,6 +653,7 @@ def animate_trace(trace,
         elif(which_animate == "progress"):
             animation_func = animate_potrf_progress
         
+    mid_time = time.time()
     padding_frames = fps // 2 # Supply a half second of stillness at the end
     animation_result = FuncAnimation(fig,animation_func, init_func = animation_init,
                                      frames=(num_frames+padding_frames),interval=1000//fps)
@@ -641,7 +677,9 @@ def animate_trace(trace,
     print("average task execution time: %f" % tasks_execution_mean)
     print("task execution time standard deviation: %f" % tasks_execution_sdev)
     print("utilization: %f over %d cores (%f)" % (utilization, num_cores, utilization/num_cores))
-    print("execution time to generate graphs: %f seconds" % (end_time-start_time))
+    print("execution time to generate graphs: %f seconds" % (end_time-mid_time))
+    print("execution time to preprocess data: %f seconds" % (mid_time-start_time))
+    print("execution time total: %f seconds" % (end_time-start_time))
     
     # Plot of the file tasks per frame
     fig, ax = plt.subplots(1, figsize = [5,5])
