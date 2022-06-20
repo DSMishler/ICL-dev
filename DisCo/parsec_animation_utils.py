@@ -146,11 +146,11 @@ def sequential_order_generator(Ntiles_m, Ntiles_n, Ntiles_k, square_size = 6):
 # `tasks_at_frame`
 # This is an array of the number of tasks which have executed since the previous
 # frame.
+# `C_stream_id`
+# An array, much like C_status, which contains that last `stream_id` of the core
+# that ran the last task in that location
 
-#### `orderdf`
-#### a dataframe containing the order the trace runs in. Set up during the init function.
 def animate_trace(trace, 
-                  trace_type,
                   task_type,
                   order_func = None,
                   which_animate = "tasks",
@@ -158,16 +158,18 @@ def animate_trace(trace,
                   num_frames = 50,         # Number of frames to use in the animation
                   enforce_interval = None, # Alternatively, determines a timestep per frame (in seconds)
                   fps = 13,
-                  M=4000,
-                  N=4000,
-                  K=4000,
-                  tilesize = 200):
+                  M = None, # Must be provided
+                  N = None, # Must be provided
+                  K = None, # Must be provided (even if the geometry of the matrix doesn't make sense for it)
+                  tilesize = None, # Must be provided
+                  bigtilesize = None # Optional
+                 ):
     
     global A_status
     global B_status
     global C_status
     global tasks_at_frame
-    global orderdf
+    global C_stream_id
     global A_expected # Currently unimplemented
     global B_expected
     global C_expected
@@ -175,6 +177,29 @@ def animate_trace(trace,
     print("Beginning animation of data '%s' method '%s'" % (title, which_animate))
     
     # Begin checks
+    if M is None:
+        print("Error: must provide argument for M")
+        return
+    if N is None:
+        print("Error: must provide argument for N")
+        return
+    if K is None:
+        print("Error: must provide argument for K (even if you don't think it makes sense in the problem!)")
+        return
+    if tilesize is None:
+        print("Error: must provide argument for tilesize (even if you don't think it makes sense in the problem!)")
+        return
+    
+    # Guess the trace type
+    # TODO: Make a more sophisticated guess
+    try:
+        trace.events["m"]
+        trace_type = "ptg"
+    except KeyError:
+        trace_type = "dtd"
+    
+    print("After observing your trace, I am guessing it is from the %s interface" % trace_type)
+    
     if trace_type == "ptg":
         pass
     elif trace_type == "dtd":
@@ -203,7 +228,7 @@ def animate_trace(trace,
         print("Error: unknown task type '" + str(task_type) +"'")
         return
     
-    if which_animate not in ["tasks", "abctasks", "progress", "abcprogress"]:
+    if which_animate not in ["tasks", "abctasks", "progress", "abcprogress", "coreswaps"]:
         print("warning, I don't know what you wanted me to animate (which_animate='%s')" % which_animate)
         print("I'll animate the progress animation")
         which_animate = "progress"
@@ -232,17 +257,26 @@ def animate_trace(trace,
         potrf_index_found = 0
         for i in trace.event_types.index:
             if "potrf_" in i.lower(): # Could possibly use regex for this...
-                print("found task type", i.lower())
-                work_tasks_indices.append(trace.event_types[i])
                 for taskname in ["gemm", "syrk", "trsm", "potrf"]:
-                    if(taskname in i.lower()):
-                        name_to_task_num[taskname] = trace.event_types[i]
+                    if(taskname in i.split('_')[-1].lower()):
+                        print("found task type %s (#%d)" % (i.lower(), trace.event_types[i]))
+                        work_tasks_indices.append(trace.event_types[i])
+                        if(running_system == "hicma"):
+                            if("3flow" in i.lower()):
+                                name_to_task_num["large-"+taskname] = trace.event_types[i]
+                            else:
+                                name_to_task_num["small-"+taskname] = trace.event_types[i]
+                        elif(running_system == "dplasma"):
+                            name_to_task_num[taskname] = trace.event_types[i]
+                        else:
+                            print("error: unknown running system")
                         potrf_index_found += 1
                         break
-                # TODO: get rid of this thing for tasks with additional potrfs
-                if potrf_index_found == 4:
-                    break
-        if potrf_index_found != 4:
+        if(running_system == "hicma"):
+            expected_task_types = 8
+        elif(running_system == "dplasma"):
+            expected_task_types = 4
+        if potrf_index_found != expected_task_types:
             print("Error: file trace does not have its event_types set properly")
             print("found %d events, expected %d" % (potrf_index_found, 4))
             return
@@ -251,14 +285,22 @@ def animate_trace(trace,
     # TODO: learn more about what this thing is.
     work_tasks = (trace.events.type == 0) & (trace.events.type == 1)
     
+    print("checking work tasks uniqueness")
     # build work_tasks while making sure that for each individual task type,
     # the indices are unique
     for i in work_tasks_indices:
+        loop_start = time.time()
+        print("checking index and preparing work tasks for ", i)
         work_task = trace.events.type == i
         work_tasks |= work_task
-        if (len(trace.events[work_task]["id"].unique()) != len(trace.events[work_task]["id"])):
-            print("Warning: file does not have fully unique tasks for task type %d" % i)
+        loop_mid = time.time()
+        # if (len(trace.events[work_task]["id"].unique()) != len(trace.events[work_task]["id"])):
+            # print("Warning: file does not have fully unique tasks for task type %d" % i)
+        loop_end = time.time()
+        # print("time for unique check:", loop_end-loop_mid)
+        print("time for array prep:  ", loop_mid-loop_start)
         
+    print("done checking uniqueness. Building order dataframe")
     orderdf = pd.DataFrame(trace.events[work_tasks].sort_values("begin"))
         
         
@@ -333,11 +375,14 @@ def animate_trace(trace,
     
     C_status = []
     C_expected = []
+    C_stream_id = []
     for i in range(Ntiles_m):
         C_status.append(np.zeros(Ntiles_n))
         C_expected.append(np.zeros(Ntiles_n))
+        C_stream_id.append(np.zeros(Ntiles_n))
     C_status = np.array(C_status)
     C_expected = np.array(C_expected)
+    C_stream_id = np.array(C_stream_id)
     
     if(which_animate == "abcprogress" or which_animate == "abctasks"):
         A_status = []
@@ -384,7 +429,7 @@ def animate_trace(trace,
     else:
         fig, ax = plt.subplots(1, figsize = [figsize_x, figsize_y])
         ax.pcolormesh(C_status, vmin = 0, vmax = visual_vmax)
-        fig.colorbar(ax.pcolormesh(C_status,vmin=0,vmax=1))
+        # fig.colorbar(ax.pcolormesh(C_status,vmin=0,vmax=1))
         ax.invert_yaxis()
     
     # Enter the animation functions
@@ -396,7 +441,7 @@ def animate_trace(trace,
         global B_status
         global C_status
         global tasks_at_frame
-        global orderdf
+        global C_stream_id
         global A_expected
         global B_expected
         global C_expected
@@ -417,6 +462,7 @@ def animate_trace(trace,
             if plots == "abc":
                 A_expected += Ntiles_n
                 B_expected += Ntiles_m
+            C_stream_id -= 1 # Set stream_id regardless of the plots
         elif task_type == "potrf": # TODO: add tasks to this animation function, have it be an even C_expected
             for i in range(len(C_expected)):
                 for j in range(len(C_expected[0])):
@@ -438,7 +484,7 @@ def animate_trace(trace,
         global B_status
         global C_status
         global tasks_at_frame
-        global orderdf
+        global C_stream_id
         global A_expected
         global B_expected
         global C_expected
@@ -462,30 +508,34 @@ def animate_trace(trace,
         
         tasks_at_frame.append(len(tasks_during))
         
-        if trace_type == "dtd":
-            for tid in tasks_during["id"]:
+        for index, task in tasks_during.iterrows():
+            if trace_type == "dtd":
+                tid = task["id"]
                 tid_normed = indices_arr[np.where(id_orders == tid)][0]
                 element = ideal_order[indices_arr[tid_normed]]
                 m = element[0]
                 n = element[1]
                 k = element[2]
-                if(plots == "c"):
-                    C_status[m, n] += 1 / C_expected[m, n]
-                elif(plots == "abc"):
-                    A_status[m, k] += 1 / A_expected[m, k]
-                    B_status[k, n] += 1 / B_expected[k, n]
-                    C_status[m, n] += 1 / C_expected[m, n]
-        elif trace_type == "ptg":
-            for index, task in tasks_during.iterrows():
+                core = task["stream_id"]
+            elif trace_type == "ptg":
                 m = task["m"]
                 n = task["n"]
                 k = task["k"]
-                if(plots == "c"):
+                core = task["stream_id"]
+                
+            if(plots == "c"):
+                if mode == "swaps":
+                    if(core != C_stream_id[m, n]):
+                        C_stream_id[m, n] = core
+                        C_status[m, n] += 1 / C_expected[m, n]
+                elif mode in ["tasks", "progress"]:
                     C_status[m, n] += 1 / C_expected[m, n]
-                elif(plots == "abc"):
-                    A_status[m, k] += 1 / A_expected[m, k]
-                    B_status[k, n] += 1 / B_expected[k, n]
-                    C_status[m, n] += 1 / C_expected[m, n]
+                else:
+                    print("error: unknown mode", mode)
+            elif(plots == "abc"):
+                A_status[m, k] += 1 / A_expected[m, k]
+                B_status[k, n] += 1 / B_expected[k, n]
+                C_status[m, n] += 1 / C_expected[m, n]
                 
         vmax_A = Ntiles_n
         vmax_B = Ntiles_m
@@ -508,6 +558,9 @@ def animate_trace(trace,
     def animate_gemm_dtd_order_with_time_all(frame):
         return animate_gemm_common(frame, "dtd", "abc", "tasks")
     
+    def animate_gemm_dtd_order_core_swaps(frame):
+        return animate_gemm_common(frame, "dtd", "c", "swaps")
+    
     def animate_gemm_dtd_order_progress(frame):
         return animate_gemm_common(frame, "dtd", "c", "progress")
         
@@ -520,6 +573,9 @@ def animate_trace(trace,
     def animate_gemm_ptg_order_with_time_all(frame):
         return animate_gemm_common(frame, "ptg", "abc", "tasks")
     
+    def animate_gemm_ptg_order_core_swaps(frame):
+        return animate_gemm_common(frame, "ptg", "c", "swaps")
+    
     def animate_gemm_ptg_order_progress(frame):
         return animate_gemm_common(frame, "ptg", "c", "progress")
         
@@ -529,7 +585,6 @@ def animate_trace(trace,
     def animate_potrf_common(frame, mode):
         global C_status
         global tasks_at_frame
-        global orderdf
         global C_expected
         # time_point_curr and time_point_prev in units of nanoseconds
         time_point_curr = ((frame+1)*(last_end - first_begin))//num_frames + first_begin
@@ -548,6 +603,7 @@ def animate_trace(trace,
         
         tasks_at_frame.append(len(tasks_during))
         
+        do_once = 1 # TODO: get rid of me
         for index, task in tasks_during.iterrows():
             m = task["m"]
             n = task["n"]
@@ -558,50 +614,122 @@ def animate_trace(trace,
                 if task["type"] == name_to_task_num["potrf"]:
                     if k is None:
                         print("k should not be none here")
-                    C_status[k, k] += 1 / C_expected[k, k]
+                    target_row = k
+                    target_col = k
                 elif task["type"] == name_to_task_num["trsm"]:
                     if k is None:
                         print("k should not be none here")
                     if n is None:
                         print("n should not be none here")
-                    C_status[n, k] += 1 / C_expected[n, k]
+                    target_row = n
+                    target_col = k
                 elif task["type"] == name_to_task_num["syrk"]:
                     if n is None:
                         print("n should not be none here")
-                    C_status[n, n] += 1 / C_expected[n, n]
+                    target_row = n
+                    target_col = n
                 elif task["type"] == name_to_task_num["gemm"]:
                     if m is None:
                         print("m should not be none here")
                     if n is None:
                         print("n should not be none here")
-                    C_status[n, m] += 1 / C_expected[n, m]
+                    target_row = n
+                    target_col = m
                 else:
-                    print(task)
                     print("error: unexpected task of type %d" % task["type"])
+                    print(task)
+                C_status[target_row, target_col] += 1 / C_expected[target_row, target_col]
             elif running_system == "hicma":
-                if task["type"] == name_to_task_num["potrf"]:
+                if task["type"] == name_to_task_num["large-potrf"]:
                     if k is None:
                         print("k should not be none here (potrf)")
-                    C_status[k, k] += 1 / C_expected[k, k]
-                elif task["type"] == name_to_task_num["trsm"]:
+                    target_row = k
+                    target_col = k
+                    large_task = True
+                elif task["type"] == name_to_task_num["large-trsm"]:
                     if m is None:
                         print("m should not be none here (trsm)")
                     if k is None:
                         print("k should not be none here (trsm)")
-                    C_status[m, k] += 1 / C_expected[m, k]
-                elif task["type"] == name_to_task_num["syrk"]:
+                    target_row = m
+                    target_col = k
+                    large_task = True
+                elif task["type"] == name_to_task_num["large-syrk"]:
                     if m is None:
                         print("m should not be none here (syrk)")
-                    C_status[m, m] += 1 / C_expected[m, m]
-                elif task["type"] == name_to_task_num["gemm"]:
+                    target_row = m
+                    target_col = m
+                    large_task = True
+                elif task["type"] == name_to_task_num["large-gemm"]:
                     if m is None:
                         print("m should not be none here (gemm)")
                     if n is None:
                         print("n should not be none here (gemm)")
-                    C_status[m, n] += 1 / C_expected[m, n]
+                    target_row = m
+                    target_col = n
+                    large_task = True
+                elif task["type"] == name_to_task_num["small-potrf"]:
+                    if k is None:
+                        print("k should not be none here (potrf)")
+                    target_row = k
+                    target_col = k
+                    large_task = False
+                    # print("small potrf: k=%d\n" % k)
+                    if(do_once == 1):
+                        # print(task)
+                        do_once = 0
+                    continue
+                elif task["type"] == name_to_task_num["small-trsm"]:
+                    if m is None:
+                        print("m should not be none here (trsm)")
+                    if k is None:
+                        print("k should not be none here (trsm)")
+                    target_row = m
+                    target_col = k
+                    large_task = False
+                    continue
+                elif task["type"] == name_to_task_num["small-syrk"]:
+                    if m is None:
+                        print("m should not be none here (syrk)")
+                    target_row = m
+                    target_col = m
+                    large_task = False
+                    continue
+                elif task["type"] == name_to_task_num["small-gemm"]:
+                    if m is None:
+                        print("m should not be none here (gemm)")
+                    if n is None:
+                        print("n should not be none here (gemm)")
+                    target_row = m
+                    target_col = n
+                    large_task = False
+                    continue
                 else:
-                    print(task)
                     print("error: unexpected task of type %d" % task["type"])
+                    print(task)
+                if large_task == True:
+                    stride = bigtilesize // tilesize # TODO: error check this
+                    for i in range(target_row*stride, (target_row+1)*stride):
+                        for j in range(target_col*stride, (target_col+1)*stride):
+                            if(j > i):
+                                if(task["type"] == name_to_task_num["large-potrf"]):
+                                    # print("potrf over-diag")
+                                    pass # No suprise
+                                elif(task["type"] == name_to_task_num["large-trsm"]):
+                                    print("trsm over-diag")
+                                elif(task["type"] == name_to_task_num["large-syrk"]):
+                                    # print("syrk over-diag")
+                                    pass # No suprise
+                                elif(task["type"] == name_to_task_num["large-gemm"]):
+                                    print("gemm over-diag")
+                                else:
+                                    print("(small) task %d over-diag" % task["type"])
+                                continue
+                            C_status[i, j] += stride / C_expected[i, j]
+                            if C_expected[i,j] == 0:
+                                print("divide by 0: i=%d,j=%d" % (i,j))
+                else:
+                    C_status[target_row, target_col] += 1 / C_expected[target_row, target_col]
             else:
                 print("Error: unknown running system")
                 
@@ -627,12 +755,17 @@ def animate_trace(trace,
             elif(which_animate == "progress"):
                 animation_func = animate_gemm_dtd_order_progress
                 animation_init = animate_init_c
+            elif(which_animate == "coreswaps"):
+                animation_func = animate_gemm_dtd_order_core_swaps
+                animation_init = animate_init_c
             elif(which_animate == "abctasks"):
                 animation_func = animate_gemm_dtd_order_with_time_all
                 animation_init = animate_init_abc
             elif(which_animate == "abcprogress"):
                 animation_func = animate_gemm_dtd_order_progress_all
                 animation_init = animate_init_abc
+            else:
+                print("error: no animation functions")
         elif(trace_type == "ptg"):
             if(which_animate == "tasks"):
                 animation_func = animate_gemm_ptg_order_with_time
@@ -640,12 +773,19 @@ def animate_trace(trace,
             elif(which_animate == "progress"):
                 animation_func = animate_gemm_ptg_order_progress
                 animation_init = animate_init_c
+            elif(which_animate == "coreswaps"):
+                animation_func = animate_gemm_ptg_order_core_swaps
+                animation_init = animate_init_c
             elif(which_animate == "abctasks"):
                 animation_func = animate_gemm_ptg_order_with_time_all
                 animation_init = animate_init_abc
             elif(which_animate == "abcprogress"):
                 animation_func = animate_gemm_ptg_order_progress_all
                 animation_init = animate_init_abc
+            else:
+                print("error: no animation functions")
+        else:
+            print("error: unrecognized trace type")
     elif (task_type == "potrf"):
         animation_init = animate_init_c
         if(which_animate == "tasks"):
