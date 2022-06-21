@@ -158,6 +158,7 @@ def animate_trace(trace,
                   num_frames = 50,         # Number of frames to use in the animation
                   enforce_interval = None, # Alternatively, determines a timestep per frame (in seconds)
                   fps = 13,
+                  fill = "relative", # relative for all will be yellow, absolute for some will be fully yellow
                   M = None, # Must be provided
                   N = None, # Must be provided
                   K = None, # Must be provided (even if the geometry of the matrix doesn't make sense for it)
@@ -190,6 +191,12 @@ def animate_trace(trace,
         print("Error: must provide argument for tilesize (even if you don't think it makes sense in the problem!)")
         return
     
+    legal_fills = ["relative", "absolute"]
+    if fill not in legal_fills:
+        print("Error: fill must be in ", legal_fills)
+        return
+        
+    
     # Guess the trace type
     # TODO: Make a more sophisticated guess
     try:
@@ -214,16 +221,15 @@ def animate_trace(trace,
     if task_type == "gemm":
         pass
     elif task_type == "potrf":
-        if trace_type == "ptg":
-            pass
-        else:
+        if trace_type != "ptg":
             print("Error: potrf only supported with ptg")
             return
         if(which_animate == "abcprogress" or which_animate == "abctasks"):
             print("Error: potrf only supported with C view")
             return
-        else:
-            pass
+        if N != M:
+            print("Error: only square animations of potrf supported")
+            return
     else:
         print("Error: unknown task type '" + str(task_type) +"'")
         return
@@ -285,9 +291,7 @@ def animate_trace(trace,
     # TODO: learn more about what this thing is.
     work_tasks = (trace.events.type == 0) & (trace.events.type == 1)
     
-    print("checking work tasks uniqueness")
-    # build work_tasks while making sure that for each individual task type,
-    # the indices are unique
+    # build work_tasks
     for i in work_tasks_indices:
         loop_start = time.time()
         print("checking index and preparing work tasks for ", i)
@@ -300,7 +304,6 @@ def animate_trace(trace,
         # print("time for unique check:", loop_end-loop_mid)
         print("time for array prep:  ", loop_mid-loop_start)
         
-    print("done checking uniqueness. Building order dataframe")
     orderdf = pd.DataFrame(trace.events[work_tasks].sort_values("begin"))
         
         
@@ -323,8 +326,10 @@ def animate_trace(trace,
         estimation_multiplier = 3 # for abc type calls
     else:
         estimation_multiplier = 1
+    if running_system == "hicma":
+        estimation_multiplier *= 0.20
     print("estimated execution time (assuming a lightweight commercial processor): %f seconds" %
-          (num_frames * 0.0004 * Ntiles_m * Ntiles_n * estimation_multiplier))
+          (num_frames * 0.0004 * ((Ntiles_m * Ntiles_n)**0.9) * estimation_multiplier))
     if(num_frames > 100):
         print("animate_trace warning: num_frames beyond 100 may cause long compute time")
     if(num_frames > 500):
@@ -457,17 +462,21 @@ def animate_trace(trace,
                      % (len(orderdf), expected_tasks)
                      + "based on the arguments you provided for N, M, K, and tilesize.")
             
-        if task_type == "gemm":
+        if task_type == "gemm": # it is irrelevant whether fill is relative or absolute here.
             C_expected += Ntiles_k
             if plots == "abc":
                 A_expected += Ntiles_n
                 B_expected += Ntiles_m
             C_stream_id -= 1 # Set stream_id regardless of the plots
         elif task_type == "potrf": # TODO: add tasks to this animation function, have it be an even C_expected
-            for i in range(len(C_expected)):
-                for j in range(len(C_expected[0])):
-                    if j <= i:
-                        C_expected[i,j] = j+1
+                                   # future daniel: what?
+            if fill == "relative":
+                for i in range(len(C_expected)):
+                    for j in range(len(C_expected[0])):
+                        if j <= i:
+                            C_expected[i,j] = j+1
+            elif fill == "absolute":
+                C_expected += len(C_expected[0])
         else:
             print("Error: unknown task type")
         return
@@ -865,7 +874,7 @@ def animate_trace(trace,
     
     """
     if(sum(sum(C_status)) != expected_tasks):
-        print("error: C_status expected updates %d times but received %d updates" %
+        print("warning: C_status expected updates %d times but received %d updates" %
               (expected_tasks, sum(sum(C_status))))
     """
     
