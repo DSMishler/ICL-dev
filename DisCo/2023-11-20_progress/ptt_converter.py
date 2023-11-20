@@ -2,6 +2,8 @@ import pandas as pd
 import sys
 import os
 
+# oringinally developed by Daniel Mishler in the fall of 2023.
+
 # take a trace from v1, and make an "events" df matching v2's "events" fields
 def tv2_events_from_tv1_trace(v1trace):
     v1events = v1trace['events']
@@ -66,7 +68,7 @@ def compare_entries(a, b):
     if type(a) is pd.core.frame.DataFrame and type(b) is pd.core.frame.DataFrame:
         # try a silly converstion?
         a = a.astype(str)
-        b = b.astype(str) # TODO: this is digusting that this works.
+        b = b.astype(str) # this is digusting that this works. Consider a better option?
         # realign axes 
         try:
             a = a[b.columns]
@@ -85,15 +87,6 @@ def compare_entries(a, b):
     if(type(comparison_obj) is pd.core.frame.DataFrame):
         for key in comparison_obj:
             if comparison_obj[key].any() == False:
-                """
-                print(a)
-                print(b)
-                print(comparison_obj)
-                print(comparison_obj.dtypes)
-                print(comparison_obj.convert_dtypes().dtypes)
-                print(comparison_obj.astype(str).dtypes)
-                print(a == b)
-                """
                 return False
         # else
         return True
@@ -128,56 +121,17 @@ def tv2_to_tv1(infile, outfile):
             continue
         if "/information" == key:
             v2trace[key].to_hdf(outfile, key=key, mode='a')
-            """
-            print("information")
-            print(v2trace[key])
-            
-            for (index, item) in v2trace[key].iteritems():
-                print("index, item: ", end="")
-                print(index, item)
-                # row = pd.Series([item], [index])
-                row = pd.DataFrame({'value': item}, index=[index])
-                print("df itself: ", end="")
-                print(row)
-                print("axes: ", end="")
-                print(row.axes)
-                v1trace.append(key, row, min_itemsize = {'index': 100, 'value': 100}) # index and value for strings
-            print("now did that work?")
-            break
-            
-            print(v2trace[key])
-            # Now how can I confirm it is the empty entry...?
-            
-            dfcopy = v2trace[key].copy()
-            dfcopy['DEVICE_MODULES'] = 1
-            dfcopy = dfcopy[:2]
-            print(dfcopy.dtype)
-            print(dfcopy)
-            v1trace.append(key, dfcopy)
-            """
             continue
         if "/nodes" == key:
             continue
         # else
-        # print(f"now storing {key}")
         v1trace.append(key, v2trace[key])
-        # print(f"just stored {key}")
     
     
-    # now handle events
-    # print("now storing events separately")
     tv1events = tv1_events_from_tv2_trace(v2trace)
-    # print(tv1events)
     
     
-    # print(tv1events.dtypes)
-    
-    # print("now we add one at a time")
     for col in tv1events:
-        # print(f'now adding {col} which has dtype {tv1events[col].dtype}')
-        # print(type(tv1events[col].dtype))
-        # print(str(tv1events[col].dtype))
-        # print("converting")
         tv1events[col] = tv1events[col].astype(str)
         
     v1trace.append("events", tv1events)
@@ -188,13 +142,11 @@ def tv2_to_tv1(infile, outfile):
     
 def tv1_to_tv2(infile, outfile):
     v1trace = pd.HDFStore(infile)
-    # v2trace = pd.HDFStore(outfile)
     
     for key in v1trace:
         if "/events" == key or "event_infos" in key:
             continue
         # else
-        # v2trace.append(key, v1trace[key])
         v1trace[key].to_hdf(outfile, key=key, mode='a')
     
     
@@ -204,7 +156,6 @@ def tv1_to_tv2(infile, outfile):
         tv2_aei[key].to_hdf(outfile, key=key, mode='a')
     
     v1trace.close()
-    # v2trace.close()
     
 def help_message():
     print(f"usage: <python> {sys.argv[0]} <version_option> <input_hdf5> <output_hdf5>")
@@ -227,35 +178,27 @@ if __name__ == "__main__":
         print(f"`{outfile}` previously existed and will be overwritten.")
         # overwrite the output file
         os.remove(outfile)
-        # print(f"`{outfile}` is a file that already exists. Do you wish to overwrite it? (yes/no)")
-        # uinput = input()
-        # if uinput == "y" or uinput == "yes":
-            # # overwrite the output file
-            # os.remove(outfile)
-        # else:
-            # print("halting execution")
-            # exit()
+        # alternatively, add this in for a comfirmation message
+        """
+        print(f"`{outfile}` is a file that already exists. Do you wish to overwrite it? (yes/no)")
+        uinput = input()
+        if uinput == "y" or uinput == "yes":
+            # overwrite the output file
+            os.remove(outfile)
+        else:
+            print("halting execution")
+            exit()
+        """
     
     if(version_option == "2t1"):
         tv2_to_tv1(infile, outfile)
-        '''
-        # to avoid string-to-int comparisons on the way back in
-        print("correct ints in the events category")
-        v1trace = pd.HDFStore(outfile)
-        for key in v1trace.events:
-            print(f"now key {key}")
-            # TODO: get this list to be done dynamically too
-            if key not in ['node_id', 'stream_id', 'taskpool_id', 'type', 'begin', 'end', 'flags', 'id']:
-                continue
-            v1trace.events[key] = v1trace.events[key].astype(str)
-        v1trace.close()
-        '''
     elif(version_option == "1t2"):
         tv1_to_tv2(infile, outfile)
     else:
         print("error: could not understand <version_option>")
         help_message()
         exit()
+        
     """
     print("SANITY CHECK")
     if (version_option == "2t1"):
